@@ -441,4 +441,171 @@ class SupervisedDataBase(DataBase):
     def save(self, databasepath):
         pickle.dump(self, open(databasepath, "wb"))
 
+class Environment(DataBase):
 
+    def __init__(self, size, symbol, features, windowsize=60, episode_length=60, tradeamount=1000, tradefees=0):
+        if (windowsize + episode_length) > size:
+            raise EnvironmentError('your size is too small')
+    
+        super().__init__(size, symbol)
+
+        self.features = features
+        self.windowsize = windowsize
+        self.episode_length = episode_length
+        self.tradeamount = tradeamount
+        self.tradefees = tradefees
+        self.act_space = 3
+        self.obs_space = (self.windowsize, len(self.features))
+
+        #episode specific variables
+        self.done = True
+        self.episode_counter = 0
+        self.action_log = pd.DataFrame()
+        self.episode_index = False
+        self.mode = 'buy'
+        self.cc_amount = 0
+        self.profit = 0
+
+        #sample the data
+        self.sampled_data = self.sample()
+
+    def sample(self):
+        """
+        change the .scaled_data to a ndarray with samples
+        """
+
+        data = pd.DataFrame()
+
+        #choose the columns
+        for feature in self.features:
+            data[feature] = self.scaled_data[feature].copy()
+
+        #save the shape of data and convert into array
+        shape = data.shape
+        array = np.array(data)
+
+        #flatten the array
+        array = array.flatten()
+
+        features_amount = shape[1]
+        #amount of elements in one window
+        window_elements = self.windowsize*features_amount
+        #amount of elements to skip in next window
+        elements_skip = features_amount
+        #amount of windows to generate
+        windows_amount = self.size-self.windowsize
+
+        #define the indexer
+        indexer = np.arange(window_elements)[None, :] + elements_skip*np.arange(windows_amount)[:, None]
+
+        #get the samples
+        samples = array[indexer].reshape(windows_amount, self.windowsize, features_amount)
+
+        self.length = samples.shape[0]
+
+        return samples
+
+    def reset(self):
+        """
+        reset the environment and return start state
+        """
+
+        self.done = False
+        self.episode_counter = 0
+        self.action_log = pd.DataFrame()
+        self.mode = 'buy'
+        self.cc_amount = 0
+        self.profit = 0
+        self.episode_index = random.randrange(0, self.length-self.episode_length, 1) #get random starstate
+
+        #get startstate
+        startstate = self.sampled_data[self.episode_index]
+
+        #setup actionlog
+        self.action_log['close'] = self.ta_data.copy()['close'][self.episode_index:self.episode_index+self.windowsize]
+        self.action_log['bsh'] = np.nan
+        self.action_log['hold'] = np.nan
+        self.action_log['buy'] = np.nan
+        self.action_log['sell'] = np.nan
+        self.action_log.reset_index(drop=True, inplace=True)
+
+        #return observation
+        return startstate
+    
+    def step(self, action):
+        """
+        -take action and calculate profit & update actionlog
+        -return next obs
+        """
+
+        #make sure environment got reset before stepping
+        if self.done:
+            raise EnvironmentError('reset the environment before stepping over it')
+
+        #update the action_log
+        index = self.action_log.tail(1).index
+        if action == 0:
+            self.action_log['bsh'][index] = 0
+            self.action_log['hold'][index] = self.action_log.copy()['close'][index]
+        elif action == 1:
+            self.action_log['bsh'][index] = 1
+            self.action_log['buy'][index] = self.action_log.copy()['close'][index]
+        elif action == 2:
+            self.action_log['bsh'][index] = 2
+            self.action_log['sell'][index] = self.action_log.copy()['close'][index]
+        else:
+            raise EnvironmentError
+        
+        #caculate the reward
+        reward = 0
+        if self.mode == 'buy':
+            if action == 1:
+                price = self.action_log['close'][index].item()
+                self.cc_amount = self.tradeamount/price
+                self.mode = 'sell'
+
+        elif self.mode == 'sell':
+            if action == 2:
+                price = self.action_log['close'][index].item()
+                amount = price*self.cc_amount
+                profit = amount - self.tradeamount
+                reward = profit
+                self.profit += profit
+                self.mode = 'buy'
+
+        #update the episodecounter/index
+        self.episode_counter += 1
+        self.episode_index += 1
+
+        if self.episode_counter <= self.episode_length:
+            #add new line to action_log
+            appender = pd.DataFrame({'close':self.ta_data.copy()['close'].iloc[self.episode_index+self.windowsize].item(),
+                                     'bsh': None, 'hold': None, 'buy': None, 'sell': None},
+                                     index=[self.windowsize])
+            self.action_log = self.action_log.append(appender, ignore_index=True)
+            self.action_log.reset_index(drop=True, inplace=True)
+            self.action_log = self.action_log.iloc[1:]
+            self.action_log.reset_index(drop=True, inplace=True)
+            #get the new observation
+            observation = self.sampled_data[self.episode_index]
+
+        else:
+            #update the doneflag
+            self.done = True
+            observation = False
+
+
+        return observation, reward, self.done
+
+    #alternative constructor
+    @staticmethod
+    def from_database(databasepath):
+        obj = pickle.load(open(databasepath, "rb"))
+        if isinstance(obj, Environment):
+            return obj
+        else:
+            raise EnvironmentError('You tried to load a file which is not an instance of Environment')
+
+    #save the object
+    def save(self, databasepath):
+        pickle.dump(self, open(databasepath, "wb"))
