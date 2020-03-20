@@ -143,3 +143,302 @@ class DataBase():
     def save(self, databasepath):
         pickle.dump(self, open(databasepath, "wb"))
 
+class SupervisedDataBase(DataBase):
+
+    def __init__(self, size, symbol, labelwindowsize=60):
+        super().__init__(size, symbol)
+        self.labelwindowsize = labelwindowsize
+        self.features = list(self.scaled_data.columns)
+        self.label_counter = 0
+        self.labelwindows = int(self.size/self.labelwindowsize)
+        self.islabeled = False
+        self.labeled_data = pd.DataFrame()
+
+    #add labels
+    def add_labels(self):
+        """
+        Add labels to the data by hand with the help of interactive matplotlib graph
+        """
+        #check if data is already labeled
+        if self.islabeled:
+            print('you already labeled your data')
+            return
+
+        #setup the dataframes
+        data = self.scaled_data.copy()
+        data2 = self.ta_data.copy()
+
+        #add columns for labeling
+        data['bsh'] = np.nan
+        data['buy'] = np.nan
+        data['sell'] = np.nan
+        data['hold'] = np.nan
+
+        #reset the indices
+        data.reset_index(drop=True, inplace=True)
+        data2.reset_index(drop=True, inplace=True)
+
+        #setup the plotting
+        fig, ax = plt.subplots()
+        plt.subplots_adjust(bottom=0.2)
+        #add spaces for buttons
+        axsave = plt.axes([0.4, 0.05, 0.2, 0.1])
+
+        #callbackfunctions
+        def updateplot():
+            
+            ax.cla()
+            ax.grid()
+            ax.plot(self.window2['close'])
+            ax.plot(self.window['sell'], color='red', marker='o')
+            ax.plot(self.window['buy'], color='green', marker='o')
+            ax.set_title(f'{self.label_counter+1}/{self.labelwindows}')
+            fig.canvas.draw()
+
+        def updatebuy(eclick, erelease):
+            start = int(round(eclick.xdata))
+            end = int(round(erelease.xdata))
+
+            for i in range(start, end+1, 1):
+                self.window.loc[i, 'buy'] = None
+                self.window.loc[i, 'sell'] = None
+                self.window.loc[i, 'bsh'] = None
+                self.window.loc[i, 'buy'] = self.window2.loc[i, 'close']
+                self.window.loc[i, 'bsh'] = 1
+
+            updateplot()
+
+        def updatesell(eclick, erelease):
+            start = int(round(eclick.xdata))
+            end = int(round(erelease.xdata))
+
+            for i in range(start, end+1, 1):
+                self.window.loc[i, 'buy'] = None
+                self.window.loc[i, 'sell'] = None
+                self.window.loc[i, 'bsh'] = None
+                self.window.loc[i, 'sell'] = self.window2.loc[i, 'close']
+                self.window.loc[i, 'bsh'] = 2
+
+            updateplot()
+
+        def updatedelete(eclick, erelease):
+            start = int(round(eclick.xdata))
+            end = int(round(erelease.xdata))
+
+            for i in range(start, end+1, 1):
+                self.window.loc[i, 'sell'] = None
+                self.window.loc[i, 'buy'] = None
+                self.window.loc[i, 'bsh'] = None
+
+            updateplot()
+        
+        def savefunction(event):
+            
+            #add holds to window
+            for a in list(self.window.index):
+                if pd.isna(self.window.loc[a, 'bsh']):
+                    self.window.loc[a, 'bsh'] = 0
+                    self.window.loc[a, 'hold'] = self.window2.loc[a, 'close']
+            
+            #append window to data3
+            self.labeled_data = self.labeled_data.append(self.window, ignore_index=True)
+            self.label_counter += 1
+
+            #autosave the labeled data
+            self.save('autosave.p')
+
+            #check if were done
+            if self.label_counter == self.labelwindows:
+                plt.close()
+                return
+
+            #get the window
+            self.window = data[self.label_counter*self.labelwindowsize:self.label_counter*self.labelwindowsize+self.labelwindowsize].copy()
+            self.window.reset_index(drop=True, inplace=True)
+            self.window2 = data2[self.label_counter*self.labelwindowsize:self.label_counter*self.labelwindowsize+self.labelwindowsize].copy()
+            self.window2.reset_index(drop=True, inplace=True)
+
+            updateplot()
+        
+        buySelector = RectangleSelector(ax, onselect=updatebuy, button=1)
+        sellSelector = RectangleSelector(ax, onselect=updatesell, button=3)
+        deleteSelector = RectangleSelector(ax, onselect=updatedelete, button=2)
+        saver = Button(axsave, ['save'])
+        saver.on_clicked(savefunction)
+
+        self.window = data[self.label_counter*self.labelwindowsize:self.label_counter*self.labelwindowsize+self.labelwindowsize].copy()
+        self.window.reset_index(drop=True, inplace=True)
+        self.window2 = data2[self.label_counter*self.labelwindowsize:self.label_counter*self.labelwindowsize+self.labelwindowsize].copy()
+        self.window2.reset_index(drop=True, inplace=True)
+
+        updateplot()
+
+        fig.show()
+        plt.show()
+
+        if self.label_counter == self.labelwindows:
+            self.size = self.labeled_data.shape[0]
+            self.labeled_data.reset_index(inplace=True, drop=True)
+            self.raw_data = self.raw_data[:self.size]
+            self.ta_data = self.ta_data[:self.size]
+            self.derive_data = self.derive_data[:self.size]
+            self.scaled_data = self.scaled_data[:self.size]
+            self.islabeled = True
+
+            self.save(f'./labeled{self.size}.p')
+
+    #sample the data
+    def sample(self, features, windowsize):
+        """
+        returns a list with elements containing:
+            -a sample of data
+            -a label
+            -a order
+        """
+        data = pd.DataFrame()
+        data2 = self.labeled_data.copy()
+
+        #choose the columns
+        for feature in features:
+            data[feature] = data2[feature]
+
+        #save the shape of data and convert into array
+        shape = data.shape
+        array = np.array(data)
+
+        #flatten the array
+        array = array.flatten()
+
+        features_amount = shape[1]
+        #amount of elements in one window
+        window_elements = windowsize*features_amount
+        #amount of elements to skip in next window
+        elements_skip = features_amount
+        #amount of windows to generate
+        windows_amount = shape[0]-windowsize+1
+
+        #define the indexer
+        indexer = np.arange(window_elements)[None, :] + elements_skip*np.arange(windows_amount)[:, None]
+
+        #get the samples
+        samples = array[indexer].reshape(windows_amount, windowsize, features_amount)
+
+        #get the labels
+        labels_array = np.array(data2['bsh'])
+        indexer2 = np.arange(windowsize-1, windowsize+windows_amount-1, step=1)
+        labels = labels_array[indexer2]
+
+        sampled_list = []
+        for i in range(samples.shape[0]):
+            sample = samples[i]
+            label = labels[i]
+            order = i
+            appender = [sample, label, order]
+            sampled_list.append(appender)
+
+        return sampled_list
+
+    #split the data
+    @staticmethod
+    def split(sampled_list, splitpercentage):
+        train_data = sampled_list[:int(len(sampled_list)*splitpercentage)]
+        test_data= sampled_list[int(len(sampled_list)*splitpercentage):]
+
+        return train_data, test_data
+ 
+    #balance the data
+    @staticmethod
+    def balance(train_samples):
+        #balance the train_samples
+        hold = []
+        buy = []
+        sell = []
+
+        for element in train_samples:
+            if element[1] == 0:
+                hold.append(element)
+            elif element[1] == 1:
+                buy.append(element)
+            elif element[1] == 2:
+                sell.append(element)
+
+        maxindex = min(len(hold), len(buy), len(sell))
+        hold = hold[:maxindex]
+        buy = buy[:maxindex]
+        sell = sell[:maxindex]
+        
+        samples = hold + buy + sell
+
+        #sort the samples
+        samples.sort(key=lambda x: x[2])
+
+        return samples
+
+    #extract the labels and samples
+    @staticmethod
+    def extract(train_samples, test_samples):
+        trainX, trainY, testX, testY = [], [], [], []
+
+        for element in train_samples:
+            trainX.append(element[0])
+            trainY.append(element[1])
+        for element in test_samples:
+            testX.append(element[0])
+            testY.append(element[1])
+
+        return np.array(trainX), np.array(trainY), np.array(testX), np.array(testY)
+
+    #get the data for training
+    def get(self, features, windowsize=60, splitpercentage=0.8, balance_traindata=True):
+        """
+        Returns four numpy arrays with samples/labels
+        """
+        if not self.islabeled:
+            print('you cant get the data which isnt completely labeled')
+            return
+        #sample the data
+        sampled_list = self.sample(features, windowsize)
+
+        #split the data
+        train_data, test_data = self.split(sampled_list, splitpercentage)
+
+        #balance the data
+        if balance_traindata == True:
+            train_data = self.balance(train_data)
+
+        return self.extract(train_data, test_data)
+
+    #get batches of sampled data
+    def getbatches(self, batchsize, features,  windowsize=60, splitpercentage=0.8, balance_traindata=True):
+        
+        trainX, trainY, testX, testY = self.get(features, windowsize, splitpercentage, balance_traindata)
+
+        #return the batched data
+        maxbatchestrain = int(trainX.shape[0] / batchsize)
+        trainXc = trainX[0:maxbatchestrain*batchsize]
+        trainYc = trainY[0:maxbatchestrain*batchsize]
+        maxbatchestest = int(testX.shape[0] / batchsize)
+        testXc = testX[0:maxbatchestest*batchsize]
+        testYc = testY[0:maxbatchestest*batchsize]
+
+        trainXc = trainXc.reshape((maxbatchestrain, batchsize, windowsize, len(features)))
+        trainYc = trainYc.reshape(maxbatchestrain, batchsize)
+        testXc = testXc.reshape((maxbatchestest, batchsize, windowsize, len(features)))
+        testYc = testYc.reshape(maxbatchestest, batchsize)
+
+        return trainXc, trainYc, testXc, testYc
+
+    #alternativa constructor
+    @staticmethod
+    def from_database(databasepath):
+        obj = pickle.load(open(databasepath, "rb"))
+        if isinstance(obj, SupervisedDataBase):
+            return obj
+        else:
+            raise EnvironmentError('You tried to load a file which is not an instance of DataBase')
+
+    #save the object
+    def save(self, databasepath):
+        pickle.dump(self, open(databasepath, "wb"))
+
+
