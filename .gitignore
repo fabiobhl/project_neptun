@@ -1,1 +1,4 @@
 keys.py
+.vscode
+.mypy_cache
+__pycache__
